@@ -1,0 +1,23 @@
+# Base de données locale
+lsf_database.db
+*.db
+
+# Données JSON (contenu pédagogique)
+educational_data.json
+
+# Environnement Python
+lsf_env/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Médias lourds
+
+# Logs
+quiz_results_log.txt
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
