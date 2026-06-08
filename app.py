@@ -10,54 +10,70 @@ import plotly.express as px
 # import cv2  # désactivé - version en ligne
 # import mediapipe as mp  # désactivé - version en ligne
 import streamlit.components.v1 as components
-import psycopg2
-import psycopg2.extras
+import mysql.connector
 import spacy
 
 
 # ════════════════════════════════════════
 #   CONFIGURATION BASE DE DONNÉES
-#   PostgreSQL Railway (production en ligne)
+#   Changez uniquement DB_MODE :
+#   "mysql"  → développement (XAMPP)
+#   "sqlite" → soutenance (sans XAMPP)
 # ════════════════════════════════════════
-DB_MODE = "postgresql"
-
-DATABASE_URL = "postgresql://postgres:eoEQtfEYPFDXkGmGBSUEgHMtnUJXbGRE@acela.proxy.rlwy.net:57948/railway"
+DB_MODE = "sqlite"
 
 def get_db_connection():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    return conn
+    if DB_MODE == "mysql":
+        import mysql.connector
+        return mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="",
+            database="lsf_db",
+            raise_on_warnings=True
+        )
+    else:
+        import sqlite3
+        conn = sqlite3.connect('lsf_database.db', check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def get_cursor(conn, dictionary=False):
-    """Retourne un curseur PostgreSQL."""
-    if dictionary:
-        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    return conn.cursor()
+    """Retourne un curseur compatible MySQL et SQLite."""
+    if DB_MODE == "mysql":
+        return conn.cursor(dictionary=dictionary)
+    else:
+        return conn.cursor()
 
 def db_execute(cursor, query, params=()):
-    """Exécute une requête SQL PostgreSQL."""
+    """Exécute une requête SQL en MySQL ou SQLite automatiquement."""
+    if DB_MODE == "sqlite":
+        query = query.replace("%s", "?")
     cursor.execute(query, params)
 
 def db_read_sql(query, conn, params=None):
-    """Lit un DataFrame PostgreSQL."""
+    """Lit un DataFrame en MySQL ou SQLite automatiquement."""
+    if DB_MODE == "sqlite":
+        query = query.replace("%s", "?")
     if params:
         return pd.read_sql(query, conn, params=params)
     return pd.read_sql(query, conn)
 
 def row_to_dict(row):
-    """Convertit un résultat PostgreSQL en dictionnaire."""
+    """Convertit un résultat SQLite ou MySQL en dictionnaire."""
     if row is None:
         return None
-    if hasattr(row, '_asdict'):
+    if DB_MODE == "sqlite":
         return dict(row)
-    if hasattr(row, 'keys'):
-        return dict(row)
-    return dict(row) if row else None
+    return row
 
 def rows_to_dict(rows):
     """Convertit une liste de résultats en liste de dictionnaires."""
     if not rows:
         return []
-    return [row_to_dict(r) for r in rows]
+    if DB_MODE == "sqlite":
+        return [dict(r) for r in rows]
+    return rows
 
 
 def get_unread_messages_count():
@@ -371,44 +387,9 @@ DB_FILE = "educational_data.json"
 # --- 1. FONCTIONS DE PERSISTANCE (JSON) ---
 
 def save_data(data):
-    """Sauvegarde les leçons dans PostgreSQL Railway."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        for lecon_id, contenu in data.items():
-            cursor.execute("""
-                INSERT INTO lecons (id, contenu, date_modification)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (id) DO UPDATE
-                SET contenu = EXCLUDED.contenu,
-                    date_modification = NOW()
-            """, (lecon_id, json.dumps(contenu, ensure_ascii=False)))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        st.error(f"Erreur sauvegarde leçons : {e}")
-
-
-def load_data():
-    """Charge les leçons depuis PostgreSQL Railway."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, contenu FROM lecons ORDER BY id")
-        rows = cursor.fetchall()
-        conn.close()
-        if rows:
-            data = {}
-            for row in rows:
-                lecon_id = row[0]
-                contenu = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-                data[lecon_id] = contenu
-            return _nettoyer_quiz(data)
-        else:
-            return {}
-    except Exception as e:
-        st.error(f"Erreur chargement leçons : {e}")
-        return {}
+    """Sauvegarde le dictionnaire complet dans le fichier JSON."""
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 
 
@@ -632,6 +613,63 @@ def _nettoyer_quiz(data):
             if "options" in q:
                 q["options"] = [o.strip() for o in q["options"]]
     return data
+
+def load_data():
+    """Charge les leçons depuis le fichier JSON ou utilise les données par défaut complètes."""
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return _nettoyer_quiz(json.load(f))
+        except Exception as e:
+            st.error(f"Erreur de lecture du fichier JSON : {e}")
+            return {}
+    else:
+        # DONNÉES INITIALES — synchronisées avec educational_data.json
+        initial_data = {
+            "Leçon 1 - LSF": {
+                "titre": "La maison ",
+                "classe": "SIL",
+                "matiere": "LSF",
+                "video": "lecon1_lsf.mp4",
+                "mots_cles": "Maison, Pièce, Cuisine, Salon, Chambre, Salle de bain, Bureau, Grenier, Garage, Cave, Balcon, Jardin",
+                "transcription": "Apprentissage du vocabulaire de la maison en LSF.",
+                "auteur": "Pascal",
+                "date_publication": "2026-05-20 07:49:26.780063",
+                "eval_mode": True,
+                "hide_revision": True,
+                "quiz_questions": [
+                    {"id": 1, "question": "Quel mot correspond à cette image", "options": ["Garage", "Cuisine", "Grenier", "Balcon"], "answer": "Balcon", "image": "signe_balcon.jpg"},
+                    {"id": 2, "question": "Quel mot correspond à ce geste", "options": ["Maison", "Cuisine", "Jardin", "Cave"], "answer": "Maison", "image": "signe_maison.jpg"},
+                    {"id": 3, "question": "Quel mot correspond à cette image", "options": ["Bureau", "Chambre", "Salon", "Maison"], "answer": "Bureau", "image": "signe_bureau.jpg"},
+                    {"id": 4, "question": "Quel mot correspond à cette image", "options": ["Salle de bain", "Grenier", "Jardin", "Cave"], "answer": "Jardin", "image": "signe_jardin.jpg"},
+                    {"id": 5, "question": "Quel mot correspond à ce geste", "options": ["Garage", "Bureau", "Chambre", "Salon"], "answer": "Garage", "image": "signe_garage.jpg"},
+                    {"id": 6, "question": "Quel mot correspond à cette image", "options": ["Maison", "Cuisine", "Grenier", "Balcon"], "answer": "Grenier", "image": "signe_grenier.jpg"}
+                ]
+            },
+            "Leçon 1 - Français": {
+                "titre": "L' alphabet ",
+                "classe": "SIL",
+                "matiere": "Français",
+                "video": "leçon 2_lsf.mp4",
+                "mots_cles": "Alphabet, Lettres, Voyelles, Consonnes",
+                "transcription": "Apprentissage de l'alphabet en LSF.",
+                "auteur": "Pascal",
+                "date_publication": "2026-06-06 07:30:38.240632",
+                "eval_mode": True,
+                "hide_revision": True,
+                "quiz_questions": [
+                    {"id": 1, "question": "Quel lettre correspond à cette image", "options": ["C", "A", "G", "D"], "answer": "A", "image": "A1.jpg"},
+                    {"id": 2, "question": "Quel lettre correspond à cette image", "options": ["C", "E", "F", "I"], "answer": "C", "image": "C1.jpg"},
+                    {"id": 3, "question": "Quel lettre correspond à cette image", "options": ["L", "B", "M", "D"], "answer": "L", "image": "L1.jpg"},
+                    {"id": 4, "question": "Quel lettre correspond à cette image", "options": ["C", "S", "O", "F"], "answer": "O", "image": "O1.jpg"},
+                    {"id": 5, "question": "Quel lettre correspond à cette image", "options": ["W", "B", "R", "I"], "answer": "R", "image": "R1.jpg"},
+                    {"id": 6, "question": "Quel lettre correspond à cette image", "options": ["C", "K", "N", "D"], "answer": "K", "image": "K1.jpg"}
+                ]
+            }
+        }
+        save_data(initial_data)
+        return initial_data
+
 
 
 # Initialisation sécurisée de l'état de session
