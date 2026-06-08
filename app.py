@@ -2735,8 +2735,11 @@ def render_dynamic_lesson(lesson_id):
     """, unsafe_allow_html=True)
     col1, col2 = st.columns([2, 1])
     with col1:
-        if os.path.exists(content["video"]): st.video(content["video"])
-        else: st.warning("Vidéo non disponible localement.")
+        if content.get("video"):
+            try:
+                st.video(content["video"])
+            except Exception:
+                st.warning("Vidéo non disponible.")
     with col2:
         st.subheader("Vocabulaires spécifiques")
         st.write(content["mots_cles"])
