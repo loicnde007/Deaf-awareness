@@ -11,7 +11,7 @@ import plotly.express as px
 # import mediapipe as mp  # désactivé - version en ligne
 import streamlit.components.v1 as components
 import mysql.connector
-# spacy remplacé par analyse légère sans dépendance externe
+import spacy
 
 
 # ════════════════════════════════════════
@@ -104,70 +104,14 @@ def text_to_speech(text):
 
 
 
-# ── Remplacement de spaCy par un tokenizer léger ──
-class _FakeToken:
-    def __init__(self, text, lemma, pos, is_stop=False, ent_type=""):
-        self.text = text
-        self.lemma_ = lemma
-        self.pos_ = pos
-        self.is_stop = is_stop
-        self.ent_type_ = ent_type
-        self.lower_ = text.lower()
+@st.cache_resource
+def load_nlp_model():
+    try:
+        return spacy.load("fr_core_news_md")
+    except:
+        return spacy.load("fr_core_news_sm")
 
-class _FakeSpan:
-    def __init__(self, text, label):
-        self.text = text
-        self.label_ = label
-
-class _FakeDoc:
-    def __init__(self, tokens, ents=None):
-        self._tokens = tokens
-        self.ents = ents or []
-    def __iter__(self):
-        return iter(self._tokens)
-    def __len__(self):
-        return len(self._tokens)
-    def __getitem__(self, idx):
-        return self._tokens[idx]
-
-# Mots vides français
-_STOP_WORDS = {
-    "le","la","les","un","de","du","des","au","aux","en","y","et","ou","à","ce","se","si",
-    "me","te","lui","nous","vous","ils","elles","je","tu","il","elle","on","que","qui",
-    "ne","pas","plus","très","bien","aussi","car","mais","donc","or","ni","or","est","être",
-    "avoir","dans","sur","sous","par","pour","avec","sans","entre","vers","chez","dont","où"
-}
-
-# Conjugaisons → infinitif (dictionnaire déjà dans transformer_en_syntaxe_lsf)
-_CONJUGUES = {
-    "suis":"être","es":"être","est":"être","sommes":"être","êtes":"être","sont":"être",
-    "étais":"être","était":"être","étaient":"être","serai":"être","sera":"être","seront":"être",
-    "ai":"avoir","as":"avoir","avons":"avoir","avez":"avoir","ont":"avoir",
-    "vais":"aller","vas":"aller","va":"aller","allons":"aller","allez":"aller","vont":"aller",
-    "fais":"faire","fait":"faire","faisons":"faire","ferai":"faire","fera":"faire",
-    "veux":"vouloir","veut":"vouloir","voulons":"vouloir","voulez":"vouloir","veulent":"vouloir",
-    "peux":"pouvoir","peut":"pouvoir","pouvons":"pouvoir","pouvez":"pouvoir","peuvent":"pouvoir",
-}
-
-def _simple_nlp(phrase):
-    """Tokenizer léger remplaçant spaCy fr_core_news_md."""
-    import re
-    tokens = []
-    for word in re.findall(r"[\w'àâéèêëîïôùûüç]+", phrase, re.UNICODE):
-        low = word.lower()
-        lemma = _CONJUGUES.get(low, low)
-        is_stop = low in _STOP_WORDS
-        pos = "VERB" if lemma != low else "NOUN"
-        tokens.append(_FakeToken(word, lemma, pos, is_stop))
-    # Détection basique de noms propres (majuscule, pas en début de phrase)
-    ents = []
-    words = re.findall(r"[\w'àâéèêëîïôùûüç]+", phrase, re.UNICODE)
-    for i, w in enumerate(words):
-        if i > 0 and w[0].isupper():
-            ents.append(_FakeSpan(w, "PER"))
-    return _FakeDoc(tokens, ents)
-
-nlp = _simple_nlp
+nlp = load_nlp_model()
 
 def transformer_en_syntaxe_lsf(phrase):
     """
@@ -2739,11 +2683,8 @@ def render_dynamic_lesson(lesson_id):
     """, unsafe_allow_html=True)
     col1, col2 = st.columns([2, 1])
     with col1:
-        if content.get("video"):
-            try:
-                st.video(content["video"])
-            except Exception:
-                st.warning("Vidéo non disponible.")
+        if os.path.exists(content["video"]): st.video(content["video"])
+        else: st.warning("Vidéo non disponible localement.")
     with col2:
         st.subheader("Vocabulaires spécifiques")
         st.write(content["mots_cles"])
