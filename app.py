@@ -125,6 +125,10 @@ class _FakeDoc:
         self.ents = ents or []
     def __iter__(self):
         return iter(self._tokens)
+    def __len__(self):
+        return len(self._tokens)
+    def __getitem__(self, idx):
+        return self._tokens[idx]
 
 # Mots vides français
 _STOP_WORDS = {
