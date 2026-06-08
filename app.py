@@ -7,70 +7,57 @@ from collections import Counter
 from datetime import datetime
 import pandas as pd     
 import plotly.express as px 
+# import cv2  # désactivé - version en ligne
+# import mediapipe as mp  # désactivé - version en ligne
 import streamlit.components.v1 as components
+import psycopg2
+import psycopg2.extras
 import spacy
 
 
 # ════════════════════════════════════════
 #   CONFIGURATION BASE DE DONNÉES
-#   Changez uniquement DB_MODE :
-#   "mysql"  → développement (XAMPP)
-#   "sqlite" → soutenance (sans XAMPP)
+#   PostgreSQL Railway (production en ligne)
 # ════════════════════════════════════════
-DB_MODE = "sqlite"
+DB_MODE = "postgresql"
+
+DATABASE_URL = "postgresql://postgres:eoEQtfEYPFDXkGmGBSUEgHMtnUJXbGRE@acela.proxy.rlwy.net:57948/railway"
 
 def get_db_connection():
-    if DB_MODE == "mysql":
-        import mysql.connector
-        return mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="",
-            database="lsf_db",
-            raise_on_warnings=True
-        )
-    else:
-        import sqlite3
-        conn = sqlite3.connect('lsf_database.db', check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    return conn
 
 def get_cursor(conn, dictionary=False):
-    """Retourne un curseur compatible MySQL et SQLite."""
-    if DB_MODE == "mysql":
-        return conn.cursor(dictionary=dictionary)
-    else:
-        return conn.cursor()
+    """Retourne un curseur PostgreSQL."""
+    if dictionary:
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    return conn.cursor()
 
 def db_execute(cursor, query, params=()):
-    """Exécute une requête SQL en MySQL ou SQLite automatiquement."""
-    if DB_MODE == "sqlite":
-        query = query.replace("%s", "?")
+    """Exécute une requête SQL PostgreSQL."""
     cursor.execute(query, params)
 
 def db_read_sql(query, conn, params=None):
-    """Lit un DataFrame en MySQL ou SQLite automatiquement."""
-    if DB_MODE == "sqlite":
-        query = query.replace("%s", "?")
+    """Lit un DataFrame PostgreSQL."""
     if params:
         return pd.read_sql(query, conn, params=params)
     return pd.read_sql(query, conn)
 
 def row_to_dict(row):
-    """Convertit un résultat SQLite ou MySQL en dictionnaire."""
+    """Convertit un résultat PostgreSQL en dictionnaire."""
     if row is None:
         return None
-    if DB_MODE == "sqlite":
+    if hasattr(row, '_asdict'):
         return dict(row)
-    return row
+    if hasattr(row, 'keys'):
+        return dict(row)
+    return dict(row) if row else None
 
 def rows_to_dict(rows):
     """Convertit une liste de résultats en liste de dictionnaires."""
     if not rows:
         return []
-    if DB_MODE == "sqlite":
-        return [dict(r) for r in rows]
-    return rows
+    return [row_to_dict(r) for r in rows]
 
 
 def get_unread_messages_count():
@@ -372,7 +359,7 @@ def transformer_en_syntaxe_lsf(phrase):
     phrase_lsf = " ".join(dict.fromkeys(r for r in resultat if r))
     return phrase_lsf.strip()
 
-# --- CONFIGURATION MEDIAPIPE --- (désactivé pour Streamlit Cloud)
+# --- CONFIGURATION MEDIAPIPE désactivée (version en ligne) ---
 
 # --- 0. CONFIGURATION ET INITIALISATION ---
 st.set_page_config(layout="wide", page_title="Plateforme LSF - Mémoire Loïc")
@@ -384,9 +371,44 @@ DB_FILE = "educational_data.json"
 # --- 1. FONCTIONS DE PERSISTANCE (JSON) ---
 
 def save_data(data):
-    """Sauvegarde le dictionnaire complet dans le fichier JSON."""
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    """Sauvegarde les leçons dans PostgreSQL Railway."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        for lecon_id, contenu in data.items():
+            cursor.execute("""
+                INSERT INTO lecons (id, contenu, date_modification)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (id) DO UPDATE
+                SET contenu = EXCLUDED.contenu,
+                    date_modification = NOW()
+            """, (lecon_id, json.dumps(contenu, ensure_ascii=False)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Erreur sauvegarde leçons : {e}")
+
+
+def load_data():
+    """Charge les leçons depuis PostgreSQL Railway."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, contenu FROM lecons ORDER BY id")
+        rows = cursor.fetchall()
+        conn.close()
+        if rows:
+            data = {}
+            for row in rows:
+                lecon_id = row[0]
+                contenu = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+                data[lecon_id] = contenu
+            return _nettoyer_quiz(data)
+        else:
+            return {}
+    except Exception as e:
+        st.error(f"Erreur chargement leçons : {e}")
+        return {}
 
 
 
@@ -610,63 +632,6 @@ def _nettoyer_quiz(data):
             if "options" in q:
                 q["options"] = [o.strip() for o in q["options"]]
     return data
-
-def load_data():
-    """Charge les leçons depuis le fichier JSON ou utilise les données par défaut complètes."""
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return _nettoyer_quiz(json.load(f))
-        except Exception as e:
-            st.error(f"Erreur de lecture du fichier JSON : {e}")
-            return {}
-    else:
-        # DONNÉES INITIALES — synchronisées avec educational_data.json
-        initial_data = {
-            "Leçon 1 - LSF": {
-                "titre": "La maison ",
-                "classe": "SIL",
-                "matiere": "LSF",
-                "video": "lecon1_lsf.mp4",
-                "mots_cles": "Maison, Pièce, Cuisine, Salon, Chambre, Salle de bain, Bureau, Grenier, Garage, Cave, Balcon, Jardin",
-                "transcription": "Apprentissage du vocabulaire de la maison en LSF.",
-                "auteur": "Pascal",
-                "date_publication": "2026-05-20 07:49:26.780063",
-                "eval_mode": True,
-                "hide_revision": True,
-                "quiz_questions": [
-                    {"id": 1, "question": "Quel mot correspond à cette image", "options": ["Garage", "Cuisine", "Grenier", "Balcon"], "answer": "Balcon", "image": "signe_balcon.jpg"},
-                    {"id": 2, "question": "Quel mot correspond à ce geste", "options": ["Maison", "Cuisine", "Jardin", "Cave"], "answer": "Maison", "image": "signe_maison.jpg"},
-                    {"id": 3, "question": "Quel mot correspond à cette image", "options": ["Bureau", "Chambre", "Salon", "Maison"], "answer": "Bureau", "image": "signe_bureau.jpg"},
-                    {"id": 4, "question": "Quel mot correspond à cette image", "options": ["Salle de bain", "Grenier", "Jardin", "Cave"], "answer": "Jardin", "image": "signe_jardin.jpg"},
-                    {"id": 5, "question": "Quel mot correspond à ce geste", "options": ["Garage", "Bureau", "Chambre", "Salon"], "answer": "Garage", "image": "signe_garage.jpg"},
-                    {"id": 6, "question": "Quel mot correspond à cette image", "options": ["Maison", "Cuisine", "Grenier", "Balcon"], "answer": "Grenier", "image": "signe_grenier.jpg"}
-                ]
-            },
-            "Leçon 1 - Français": {
-                "titre": "L' alphabet ",
-                "classe": "SIL",
-                "matiere": "Français",
-                "video": "leçon 2_lsf.mp4",
-                "mots_cles": "Alphabet, Lettres, Voyelles, Consonnes",
-                "transcription": "Apprentissage de l'alphabet en LSF.",
-                "auteur": "Pascal",
-                "date_publication": "2026-06-06 07:30:38.240632",
-                "eval_mode": True,
-                "hide_revision": True,
-                "quiz_questions": [
-                    {"id": 1, "question": "Quel lettre correspond à cette image", "options": ["C", "A", "G", "D"], "answer": "A", "image": "A1.jpg"},
-                    {"id": 2, "question": "Quel lettre correspond à cette image", "options": ["C", "E", "F", "I"], "answer": "C", "image": "C1.jpg"},
-                    {"id": 3, "question": "Quel lettre correspond à cette image", "options": ["L", "B", "M", "D"], "answer": "L", "image": "L1.jpg"},
-                    {"id": 4, "question": "Quel lettre correspond à cette image", "options": ["C", "S", "O", "F"], "answer": "O", "image": "O1.jpg"},
-                    {"id": 5, "question": "Quel lettre correspond à cette image", "options": ["W", "B", "R", "I"], "answer": "R", "image": "R1.jpg"},
-                    {"id": 6, "question": "Quel lettre correspond à cette image", "options": ["C", "K", "N", "D"], "answer": "K", "image": "K1.jpg"}
-                ]
-            }
-        }
-        save_data(initial_data)
-        return initial_data
-
 
 
 # Initialisation sécurisée de l'état de session
@@ -2498,499 +2463,26 @@ def render_home():
 
 
 
-# ══════════════════════════════════════════════════════════════════
-#   MOTEUR DE RECONNAISSANCE LSF — 46 GESTES PAR RÈGLES LANDMARKS
-#   Chiffres 0-9 | Dactylologie A-Z | Signes courants
-# ══════════════════════════════════════════════════════════════════
-
-def _lm(h, i):
-    return h.landmark[i]
-
-def _doigt_leve(h, tip, pip):
-    return _lm(h, tip).y < _lm(h, pip).y
-
-def _pouce_leve(h):
-    tip_x   = _lm(h, 4).x
-    mcp_x   = _lm(h, 2).x
-    wrist_x = _lm(h, 0).x
-    if wrist_x < 0.5:
-        return tip_x < mcp_x
-    return tip_x > mcp_x
-
-def _pouce_plie(h):
-    return not _pouce_leve(h)
-
-def _dist(h, i, j):
-    dx = _lm(h, i).x - _lm(h, j).x
-    dy = _lm(h, i).y - _lm(h, j).y
-    return math.sqrt(dx*dx + dy*dy)
-
-def _pince(h, t1, t2, s=0.07):
-    return _dist(h, t1, t2) < s
-
-def _doigts(h):
-    """Retourne (pouce, index, majeur, annulaire, auriculaire) True=levé."""
-    return (
-        _pouce_leve(h),
-        _doigt_leve(h, 8,  6),
-        _doigt_leve(h, 12, 10),
-        _doigt_leve(h, 16, 14),
-        _doigt_leve(h, 20, 18),
-    )
-
-# ── Chiffres ──────────────────────────────────────────────────────
-def _c0(h):
-    po,i,m,a,au = _doigts(h)
-    return not i and not m and not a and not au and _dist(h,8,4)<0.12 and _dist(h,4,0)<0.35
-
-def _c1(h):
-    po,i,m,a,au = _doigts(h)
-    return i and not m and not a and not au and _pouce_plie(h)
-
-def _c2(h):
-    po,i,m,a,au = _doigts(h)
-    return i and m and not a and not au and _dist(h,8,12)>0.06
-
-def _c3(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and m and not a and not au
-
-def _c4(h):
-    po,i,m,a,au = _doigts(h)
-    return not po and i and m and a and au
-
-def _c5(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and m and a and au
-
-def _c6(h):
-    po,i,m,a,au = _doigts(h)
-    return po and not i and not m and not a and au
-
-def _c7(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and not m and not a and au
-
-def _c8(h):
-    po,i,m,a,au = _doigts(h)
-    return po and not i and m and not a and au
-
-def _c9(h):
-    po,i,m,a,au = _doigts(h)
-    return _pince(h,4,8,0.08) and m and a and au
-
-# ── Dactylologie A-Z ──────────────────────────────────────────────
-def _lA(h):
-    po,i,m,a,au = _doigts(h)
-    return not i and not m and not a and not au and _pouce_plie(h)
-
-def _lB(h):
-    po,i,m,a,au = _doigts(h)
-    return not po and i and m and a and au and _dist(h,8,12)<0.05
-
-def _lC(h):
-    po,i,m,a,au = _doigts(h)
-    return (not i and not m and not a and not au
-            and 0.12 < _dist(h,8,4) < 0.30
-            and _lm(h,8).x > _lm(h,5).x)
-
-def _lD(h):
-    po,i,m,a,au = _doigts(h)
-    return i and not m and not a and not au and _pince(h,4,12,0.09)
-
-def _lE(h):
-    po,i,m,a,au = _doigts(h)
-    return not i and not m and not a and not au and not po
-
-def _lF(h):
-    return _pince(h,4,8,0.08) and _doigt_leve(h,12,10) and _doigt_leve(h,16,14) and _doigt_leve(h,20,18)
-
-def _lG(h):
-    po,i,m,a,au = _doigts(h)
-    return i and not m and not a and not au and abs(_lm(h,8).y - _lm(h,5).y) < 0.08
-
-def _lH(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and m and not a and not au
-            and abs(_lm(h,8).y  - _lm(h,5).y)  < 0.08
-            and abs(_lm(h,12).y - _lm(h,9).y)  < 0.08)
-
-def _lI(h):
-    po,i,m,a,au = _doigts(h)
-    return not i and not m and not a and au and _pouce_plie(h)
-
-def _lJ(h):
-    return _lI(h)
-
-def _lK(h):
-    po,i,m,a,au = _doigts(h)
-    return (po and i and m and not a and not au
-            and _dist(h,4,8)<0.12 and _dist(h,8,12)>0.05)
-
-def _lL(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and not m and not a and not au
-
-def _lM(h):
-    po,i,m,a,au = _doigts(h)
-    return (not i and not m and not a and not au
-            and _dist(h,4,8)<0.10 and _dist(h,4,12)<0.10)
-
-def _lN(h):
-    po,i,m,a,au = _doigts(h)
-    return (not i and not m and not a and not au
-            and _dist(h,4,8)<0.10 and _dist(h,4,12)>=0.10)
-
-def _lO(h):
-    po,i,m,a,au = _doigts(h)
-    return not i and not m and not a and not au and _dist(h,4,8)<0.09
-
-def _lP(h):
-    po,i,m,a,au = _doigts(h)
-    return (po and i and m and not a and not au
-            and _lm(h,8).y > _lm(h,5).y)
-
-def _lQ(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and not m and not a and not au and _pouce_plie(h)
-            and _lm(h,8).y > _lm(h,0).y)
-
-def _lR(h):
-    po,i,m,a,au = _doigts(h)
-    return i and m and not a and not au and _dist(h,8,12)<0.04
-
-def _lS(h):
-    po,i,m,a,au = _doigts(h)
-    return (not i and not m and not a and not au
-            and _pouce_leve(h) and _dist(h,4,8)<0.12)
-
-def _lT(h):
-    po,i,m,a,au = _doigts(h)
-    return (not i and not m and not a and not au
-            and _pouce_leve(h) and _dist(h,4,6)<0.09)
-
-def _lU(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and m and not a and not au and _pouce_plie(h)
-            and _dist(h,8,12)<0.05)
-
-def _lV(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and m and not a and not au and _pouce_plie(h)
-            and _dist(h,8,12)>0.06)
-
-def _lW(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and m and a and not au and _pouce_plie(h)
-            and _dist(h,8,16)>0.10)
-
-def _lX(h):
-    po,i,m,a,au = _doigts(h)
-    tip_y = _lm(h,8).y; pip_y = _lm(h,6).y; mcp_y = _lm(h,5).y
-    return pip_y < tip_y < mcp_y and not m and not a and not au
-
-def _lY(h):
-    po,i,m,a,au = _doigts(h)
-    return po and not i and not m and not a and au
-
-def _lZ(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and not m and not a and not au and _dist(h,4,8)>0.15
-
-# ── Signes courants ───────────────────────────────────────────────
-def _sBonjour(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and m and a and au and _dist(h,4,20) <= 0.30
-
-def _sMerci(h):
-    po,i,m,a,au = _doigts(h)
-    return not po and i and m and a and au and _dist(h,8,20)<0.08
-
-def _sOui(h):
-    po,i,m,a,au = _doigts(h)
-    return not i and not m and not a and not au and not po
-
-def _sNon(h):
-    po,i,m,a,au = _doigts(h)
-    return i and m and not a and not au and not po and _dist(h,8,12)<0.04
-
-def _sAide(h):
-    po,i,m,a,au = _doigts(h)
-    return po and not i and not m and not a and not au
-
-def _sStop(h):
-    po,i,m,a,au = _doigts(h)
-    return po and i and m and a and au and _dist(h,4,20)>0.30
-
-def _sBravo(h):
-    po,i,m,a,au = _doigts(h)
-    return (po and i and m and a and au
-            and _dist(h,4,20)<=0.30 and _lm(h,0).y>0.5)
-
-def _sMoi(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and not m and not a and not au and _pouce_plie(h)
-            and _lm(h,8).y > _lm(h,0).y)
-
-def _sToi(h):
-    po,i,m,a,au = _doigts(h)
-    return (i and not m and not a and not au and _pouce_plie(h)
-            and _lm(h,8).y < _lm(h,0).y)
-
-def _sAimer(h):
-    po,i,m,a,au = _doigts(h)
-    return po and not i and not m and not a and not au and _lm(h,0).y>0.4
-
-# ── Table des règles (ordre : du plus spécifique au plus général) ──
-_REGLES_LSF = [
-    ("STOP",    _sStop),
-    ("MERCI",   _sMerci),
-    ("NON",     _sNon),
-    ("AIMER",   _sAimer),
-    ("AIDE",    _sAide),
-    ("BRAVO",   _sBravo),
-    ("BONJOUR", _sBonjour),
-    ("OUI",     _sOui),
-    ("MOI",     _sMoi),
-    ("TOI",     _sToi),
-    ("9", _c9), ("0", _c0), ("6", _c6), ("7", _c7), ("8", _c8),
-    ("3", _c3), ("2", _c2), ("4", _c4), ("5", _c5), ("1", _c1),
-    ("F", _lF), ("R", _lR), ("U", _lU), ("V", _lV), ("K", _lK),
-    ("P", _lP), ("H", _lH), ("G", _lG), ("X", _lX), ("Y", _lY),
-    ("W", _lW), ("Z", _lZ), ("L", _lL), ("D", _lD), ("Q", _lQ),
-    ("C", _lC), ("O", _lO), ("I", _lI), ("J", _lJ), ("T", _lT),
-    ("S", _lS), ("M", _lM), ("N", _lN), ("E", _lE), ("A", _lA),
-    ("B", _lB),
-]
-
-def _detecter_geste_lsf(hand_landmarks):
-    """Retourne le label du geste statique détecté, ou None si aucun."""
-    if hand_landmarks is None:
-        return None
-    for label, fn in _REGLES_LSF:
-        try:
-            if fn(hand_landmarks):
-                return label
-        except Exception:
-            continue
-    return None
-
 
 # ══════════════════════════════════════════════════════════════════
-#   TRACKER DE MOUVEMENT — Gestes dynamiques (J, Z, OUI, NON, BONJOUR)
-# ══════════════════════════════════════════════════════════════════
-#
-#  Principe : on mémorise les positions (x, y) du poignet (landmark 0)
-#  et de l'index tip (landmark 8) sur une fenêtre glissante de N frames.
-#  On calcule les déplacements totaux dx/dy pour identifier le pattern.
-#
-#  Gestes dynamiques détectés :
-#   OUI     → poing fermé + oscillation verticale (dy oscillant)
-#   NON     → deux doigts + oscillation horizontale (dx oscillant)
-#   BONJOUR → main ouverte + grand arc latéral (dx large)
-#   J       → auriculaire seul + tracé en J (courbe bas→haut→gauche)
-#   Z       → index seul + tracé en Z (droite→gauche→droite en zigzag)
-
-_TAILLE_HISTORIQUE_MVT = 20   # Nombre de frames mémorisées
-_SEUIL_MVT             = 0.04  # Déplacement minimal pour considérer un mouvement
-
-class _TrackerMouvement:
-    """Fenêtre glissante des positions du poignet et de l'index."""
-
-    def __init__(self, taille=_TAILLE_HISTORIQUE_MVT):
-        self.taille    = taille
-        self.poignets  = []   # (x, y) landmark 0
-        self.index_tip = []   # (x, y) landmark 8
-        self.geste_dynamique_actif = None
-        self.compteur_freeze       = 0   # frames sans mouvement
-
-    def mise_a_jour(self, hand_landmarks):
-        if hand_landmarks is None:
-            self.poignets.clear()
-            self.index_tip.clear()
-            self.geste_dynamique_actif = None
-            return
-
-        px = hand_landmarks.landmark[0].x
-        py = hand_landmarks.landmark[0].y
-        ix = hand_landmarks.landmark[8].x
-        iy = hand_landmarks.landmark[8].y
-
-        self.poignets.append((px, py))
-        self.index_tip.append((ix, iy))
-        if len(self.poignets)  > self.taille: self.poignets.pop(0)
-        if len(self.index_tip) > self.taille: self.index_tip.pop(0)
-
-    def _dx_dy_poignet(self):
-        """Déplacement net (début→fin) du poignet sur la fenêtre."""
-        if len(self.poignets) < 8:
-            return 0.0, 0.0
-        dx = self.poignets[-1][0] - self.poignets[0][0]
-        dy = self.poignets[-1][1] - self.poignets[0][1]
-        return dx, dy
-
-    def _amplitude_x(self):
-        """Amplitude horizontale max sur la fenêtre (max_x - min_x)."""
-        if len(self.poignets) < 8:
-            return 0.0
-        xs = [p[0] for p in self.poignets]
-        return max(xs) - min(xs)
-
-    def _amplitude_y(self):
-        """Amplitude verticale max sur la fenêtre."""
-        if len(self.poignets) < 8:
-            return 0.0
-        ys = [p[1] for p in self.poignets]
-        return max(ys) - min(ys)
-
-    def _oscillations(self, axe="x", seuil=_SEUIL_MVT):
-        """
-        Compte les changements de direction sur l'axe donné.
-        Utile pour distinguer un mouvement aller-retour (OUI/NON)
-        d'un déplacement linéaire.
-        """
-        pts = self.poignets
-        if len(pts) < 6:
-            return 0
-        vals = [p[0] if axe == "x" else p[1] for p in pts]
-        direction = None
-        oscillations = 0
-        for k in range(1, len(vals)):
-            delta = vals[k] - vals[k-1]
-            if abs(delta) < seuil / 4:
-                continue
-            new_dir = 1 if delta > 0 else -1
-            if direction is not None and new_dir != direction:
-                oscillations += 1
-            direction = new_dir
-        return oscillations
-
-    def _zigzag_index(self, seuil=_SEUIL_MVT):
-        """
-        Détecte un tracé en Z sur l'index :
-        droite → gauche-bas → droite  (3 segments distincts).
-        """
-        if len(self.index_tip) < 12:
-            return False
-        pts = self.index_tip
-        n   = len(pts)
-        t1  = pts[:n//3]
-        t2  = pts[n//3: 2*n//3]
-        t3  = pts[2*n//3:]
-        dx1 = t1[-1][0] - t1[0][0]   # segment 1 : droite
-        dx2 = t2[-1][0] - t2[0][0]   # segment 2 : gauche
-        dy2 = t2[-1][1] - t2[0][1]   # segment 2 : vers le bas
-        dx3 = t3[-1][0] - t3[0][0]   # segment 3 : droite
-        return (dx1 >  seuil and
-                dx2 < -seuil and dy2 > seuil and
-                dx3 >  seuil)
-
-    def _courbe_J(self, seuil=_SEUIL_MVT):
-        """
-        Détecte un tracé en J sur l'index :
-        vers le bas → courbe vers la gauche (auriculaire levé seul).
-        """
-        if len(self.index_tip) < 10:
-            return False
-        pts = self.index_tip
-        n   = len(pts)
-        moitie1 = pts[:n//2]
-        moitie2 = pts[n//2:]
-        dy1 = moitie1[-1][1] - moitie1[0][1]   # descend
-        dx2 = moitie2[-1][0] - moitie2[0][0]   # part à gauche
-        return dy1 > seuil and dx2 < -seuil
-
-    def detecter_dynamique(self, hand_landmarks):
-        """
-        Analyse le mouvement et retourne un geste dynamique ou None.
-        Priorité sur les gestes statiques si un pattern est clairement reconnu.
-        """
-        if hand_landmarks is None:
-            return None
-
-        h   = hand_landmarks
-        po, i, m, a, au = _doigts(h)
-
-        amp_x  = self._amplitude_x()
-        amp_y  = self._amplitude_y()
-        osc_x  = self._oscillations("x")
-        osc_y  = self._oscillations("y")
-
-        # ── OUI : poing fermé + oscillation verticale ──
-        if (not i and not m and not a and not au
-                and amp_y > 0.06 and osc_y >= 2):
-            return "OUI"
-
-        # ── NON : index+majeur joints + oscillation horizontale ──
-        if (i and m and not a and not au and not po
-                and amp_x > 0.06 and osc_x >= 2):
-            return "NON"
-
-        # ── BONJOUR : main ouverte + grand arc latéral ──
-        if (po and i and m and a and au
-                and amp_x > 0.12):
-            return "BONJOUR"
-
-        # ── J : auriculaire seul + tracé en J ──
-        if (not i and not m and not a and au and self._courbe_J()):
-            return "J"
-
-        # ── Z : index seul + tracé en Z ──
-        if (i and not m and not a and not au and self._zigzag_index()):
-            return "Z"
-
-        return None
-
-
-# Couleurs par catégorie pour l'affichage sur la frame
-_COULEURS_GESTE = {
-    "BONJOUR": (0,230,100), "MERCI": (0,200,255), "OUI": (0,230,100),
-    "NON": (0,60,220),      "AIDE": (0,165,255),  "STOP": (0,60,220),
-    "BRAVO": (0,230,100),   "MOI": (255,200,0),   "TOI": (255,200,0),
-    "AIMER": (0,60,220),    "J":   (200,100,255), "Z":   (200,100,255),
-}
-def _couleur_geste(label):
-    if label in _COULEURS_GESTE:
-        return _COULEURS_GESTE[label]
-    if label.isdigit():
-        return (0, 200, 255)
-    return (200, 100, 255)
-
-
-# ══════════════════════════════════════════════════════════════════
-#   FONCTION PRINCIPALE — RECONNAISSANCE EN DIRECT
+#   MOTEUR DE RECONNAISSANCE LSF — désactivé (version en ligne)
 # ══════════════════════════════════════════════════════════════════
 
 def recognize_sign_language():
-    load_css()
+    """Reconnaissance LSF désactivée sur la version en ligne (MediaPipe non disponible)."""
+    import streamlit as st
     st.markdown("""
-    <div class="an-header">
-        <h2>🤟 Reconnaissance en Direct</h2>
-        <p>Détection des signes LSF via la caméra · 46 gestes · Statique &amp; Dynamique</p>
+    <div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:12px;
+                padding:24px;text-align:center;color:#92400E;">
+        <h3>🤟 Reconnaissance en Direct</h3>
+        <p>Cette fonctionnalité nécessite la version locale de l'application.<br>
+        Elle utilise MediaPipe et votre caméra, ce qui n'est pas disponible
+        sur la version hébergée en ligne.</p>
+        <p><strong>Téléchargez la version locale pour accéder à cette fonctionnalité.</strong></p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.warning("⚠️ La reconnaissance en direct n'est pas disponible sur la version en ligne.")
-    st.info(
-        "💡 Cette fonctionnalité utilise **MediaPipe** et **OpenCV** pour détecter les gestes LSF "
-        "via votre caméra. Elle nécessite une installation locale.\n\n"
-        "**Pour l'utiliser :**\n"
-        "1. Téléchargez le projet depuis GitHub\n"
-        "2. Installez les dépendances : `pip install mediapipe opencv-python`\n"
-        "3. Lancez l'app localement : `streamlit run app.py`"
-    )
 
-    with st.expander("📖 Gestes reconnus (46 au total)", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("**🔢 Chiffres** *(statique)*")
-            st.markdown("0 · 1 · 2 · 3 · 4 · 5 · 6 · 7 · 8 · 9")
-        with col2:
-            st.markdown("**🔤 Dactylologie** *(statique · J et Z dynamiques)*")
-            st.markdown("A · B · C · D · E · F · G · H · I · **J** · K · L · M · N · O · P · Q · R · S · T · U · V · W · X · Y · **Z**")
-        with col3:
-            st.markdown("**🤟 Signes courants** *(OUI · NON · BONJOUR dynamiques)*")
-            st.markdown("**BONJOUR** · MERCI · **OUI** · **NON** · AIDE · STOP · BRAVO · MOI · TOI · AIMER")
 
 
 
